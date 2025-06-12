@@ -2,9 +2,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 
 """Configs."""
-
 import math
-
 from fvcore.common.config import CfgNode
 
 from . import custom_config
@@ -15,7 +13,21 @@ from . import custom_config
 _C = CfgNode()
 
 # -----------------------------------------------------------------------------
-# Contrastive Model (for MoCo, SimCLR, SwAV, BYOL)
+# Continual learning options
+# -----------------------------------------------------------------------------
+_C.CONTINUAL = CfgNode()
+_C.CONTINUAL.SHUFFLE = True
+_C.CONTINUAL.ENABLE = False
+_C.CONTINUAL.NUM_TASKS = 5
+
+_C.PROMPT_POOL = CfgNode()
+_C.PROMPT_POOL.ENABLE = False
+_C.PROMPT_POOL.NUM_PROMPTS = 1
+_C.PROMPT_POOL.POOL_SIZE = 10
+_C.PROMPT_POOL.PROMPT_LENGTH = 5
+_C.PROMPT_POOL.TOP_K = 10
+# -----------------------------------------------------------------------------
+#  Model (for MoCo, SimCLR, SwAV, BYOL)
 # -----------------------------------------------------------------------------
 
 _C.CONTRASTIVE = CfgNode()
@@ -260,7 +272,10 @@ _C.MIXUP.LABEL_SMOOTH_VALUE = 0.1
 # Testing options
 # ---------------------------------------------------------------------------- #
 _C.TEST = CfgNode()
-
+# parisa 
+_C.TEST.PROMPT_LABEL = True
+_C.TEST.DATASET_EXIST = False
+# parisa
 # If True test the model, else skip the testing.
 _C.TEST.ENABLE = True
 
@@ -410,6 +425,9 @@ _C.MODEL.SINGLE_PATHWAY_ARCH = [
     "x3d",
     "mvit",
     "maskmvit",
+    "vitb32", 
+    "vitb16",
+    "vitl14",
 ]
 
 # Model architectures that has multiple pathways.
@@ -798,11 +816,19 @@ _C.DATA.IN22K_TRAINVAL = False
 _C.DATA.IN22k_VAL_IN1K = ""
 
 # Large resolution models may use different crop ratios
-_C.DATA.IN_VAL_CROP_RATIO = 0.875  # 224/256 = 0.875
+_C.DATA.IN_VAL_CROP_RATIO = 0.875 # 224/256 = 0.875
 
 # don't use real video for kinetics.py
 _C.DATA.DUMMY_LOAD = False
-
+# parisa
+"""
+The comment # don't use real video for kinetics.py suggests that the dummy 
+data option might be particularly relevant for the Kinetics dataset, which is
+ large and requires significant resources to process. 
+Using dummy data can save time and resources during development. 
+"""
+# parisa 
+#
 # ---------------------------------------------------------------------------- #
 # Optimizer options
 # ---------------------------------------------------------------------------- #
