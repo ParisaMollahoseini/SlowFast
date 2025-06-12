@@ -4,16 +4,19 @@
 """Data loader."""
 
 import itertools
+import numpy as np
 from functools import partial
 from typing import List
-
-import numpy as np
 import torch
-
-from slowfast.datasets.multigrid_helper import ShortCycleBatchSampler
 from torch.utils.data._utils.collate import default_collate
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.sampler import RandomSampler, Sampler
+
+from torch.utils.data import Subset
+import random
+
+
+from slowfast.datasets.multigrid_helper import ShortCycleBatchSampler
 
 from . import utils as utils
 from .build import build_dataset
@@ -76,14 +79,99 @@ def detection_collate(batch):
             bboxes = np.concatenate(bboxes, axis=0)
             collated_extra_data[key] = torch.tensor(bboxes).float()
         elif key == "metadata":
-            collated_extra_data[key] = torch.tensor(list(itertools.chain(*data))).view(
-                -1, 2
-            )
+            collated_extra_data[key] = torch.tensor(
+                list(itertools.chain(*data))
+            ).view(-1, 2)
         else:
             collated_extra_data[key] = default_collate(data)
 
     return inputs, labels, video_idx, time, collated_extra_data
 
+# added by parisa
+def construct_continual_loader(cfg):
+    split = ['train','val','test']
+
+    # Create base dataset
+    dataset = dict()
+    dataset['train'] = build_dataset(cfg.TRAIN.DATASET, cfg, split[0])
+    dataset['val'] = build_dataset(cfg.TRAIN.DATASET, cfg, split[1])
+    dataset['test'] = build_dataset(cfg.TEST.DATASET, cfg, split[2])    
+
+    # Calculate number of classes per task
+    num_classes = len(np.unique(dataset['train']._labels))
+    classes_per_task = num_classes // cfg.CONTINUAL.NUM_TASKS
+
+    # Generate class indices
+    labels = list(range(num_classes))
+    if cfg.CONTINUAL.SHUFFLE:
+        # added by parisa
+        random.seed(42)
+        random.shuffle(labels)
+
+    split_datasets = {
+        'train': [],
+        'val': [],
+        'test': []
+    }
+    class_masks = []
+
+    for task_idx in range(cfg.CONTINUAL.NUM_TASKS):
+        if task_idx == cfg.CONTINUAL.NUM_TASKS - 1:
+            # Last task gets all remaining classes
+            current_classes = labels[task_idx * classes_per_task:]
+        else:
+            current_classes = labels[task_idx * classes_per_task : (task_idx + 1) * classes_per_task]
+
+        class_masks.append(current_classes)
+
+        # Find indices corresponding to current task's classes
+        split_indices = [i for i, target in enumerate(dataset['train']._labels) if target in current_classes]
+        split_indices_test = [i for i, target in enumerate(dataset['test']._labels) if target in current_classes]
+        split_indices_val = [i for i, target in enumerate(dataset['val']._labels) if target in current_classes]
+
+        # Create subset for current task
+        task_dataset_train = Subset(dataset['train'], split_indices)
+        task_dataset_test = Subset(dataset['test'], split_indices_test)
+        task_dataset_val = Subset(dataset['val'], split_indices_val)
+
+        # Construct loader using your original construct_loader logic
+        sampler_train = utils.create_sampler(task_dataset_train, shuffle=True, cfg=cfg)
+        sampler_test = utils.create_sampler(task_dataset_test, shuffle=False, cfg=cfg)
+        sampler_val = utils.create_sampler(task_dataset_val, shuffle=False, cfg=cfg)
+        
+        split_datasets['train'].append(torch.utils.data.DataLoader(
+            task_dataset_train,
+            batch_size=cfg.TRAIN.BATCH_SIZE if split == 'train' else cfg.TEST.BATCH_SIZE,
+            shuffle=(False if sampler_train else (split == 'train')),
+            sampler=sampler_train,
+            num_workers=cfg.DATA_LOADER.NUM_WORKERS,
+            pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
+            drop_last=(split == 'train'),
+            worker_init_fn=utils.loader_worker_init_fn(task_dataset_train),
+        ))
+        split_datasets['val'].append(torch.utils.data.DataLoader(
+            task_dataset_val,
+            batch_size=cfg.TEST.BATCH_SIZE,
+            shuffle=(False if sampler_val else False),
+            sampler=sampler_val,
+            num_workers=cfg.DATA_LOADER.NUM_WORKERS,
+            pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
+            drop_last=False,
+            worker_init_fn=utils.loader_worker_init_fn(task_dataset_val),
+        ))
+        split_datasets['test'].append(torch.utils.data.DataLoader(
+            task_dataset_test,
+            batch_size=cfg.TEST.BATCH_SIZE,
+            shuffle=(False if sampler_test else False),
+            sampler=sampler_test,
+            num_workers=cfg.DATA_LOADER.NUM_WORKERS,
+            pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
+            drop_last=False,
+            worker_init_fn=utils.loader_worker_init_fn(task_dataset_test),
+        ))
+
+
+    return split_datasets, class_masks
 
 def construct_loader(cfg, split, is_precise_bn=False):
     """
@@ -94,7 +182,7 @@ def construct_loader(cfg, split, is_precise_bn=False):
         split (str): the split of the data loader. Options include `train`,
             `val`, and `test`.
     """
-    assert split in ["train", "val", "test"]
+    assert split in ["train", "val", "test", "test_openset"]
     if split in ["train"]:
         dataset_name = cfg.TRAIN.DATASET
         batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
@@ -105,7 +193,7 @@ def construct_loader(cfg, split, is_precise_bn=False):
         batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
         shuffle = False
         drop_last = False
-    elif split in ["test"]:
+    elif split in ["test", "test_openset"]:
         dataset_name = cfg.TEST.DATASET
         batch_size = int(cfg.TEST.BATCH_SIZE / max(1, cfg.NUM_GPUS))
         shuffle = False
@@ -125,7 +213,11 @@ def construct_loader(cfg, split, is_precise_bn=False):
             worker_init_fn=utils.loader_worker_init_fn(dataset),
         )
     else:
-        if cfg.MULTIGRID.SHORT_CYCLE and split in ["train"] and not is_precise_bn:
+        if (
+            cfg.MULTIGRID.SHORT_CYCLE
+            and split in ["train"]
+            and not is_precise_bn
+        ):
             # Create a sampler for multi-process training
             sampler = utils.create_sampler(dataset, shuffle, cfg)
             batch_sampler = ShortCycleBatchSampler(
@@ -172,7 +264,6 @@ def construct_loader(cfg, split, is_precise_bn=False):
             )
     return loader
 
-
 def shuffle_dataset(loader, cur_epoch):
     """ "
     Shuffles the data.
@@ -180,7 +271,10 @@ def shuffle_dataset(loader, cur_epoch):
         loader (loader): data loader to perform shuffle.
         cur_epoch (int): number of the current epoch.
     """
-    if loader._dataset_kind == torch.utils.data.dataloader._DatasetKind.Iterable:
+    if (
+        loader._dataset_kind
+        == torch.utils.data.dataloader._DatasetKind.Iterable
+    ):
         if hasattr(loader.dataset, "sampler"):
             sampler = loader.dataset.sampler
         else:
