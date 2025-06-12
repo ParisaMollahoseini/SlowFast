@@ -4,24 +4,17 @@
 """Meters."""
 
 import datetime
+import numpy as np
 import os
 from collections import defaultdict, deque
-
-import numpy as np
-
-import slowfast.datasets.ava_helper as ava_helper
-import slowfast.utils.logging as logging
-import slowfast.utils.metrics as metrics
-import slowfast.utils.misc as misc
 import torch
 from fvcore.common.timer import Timer
 from sklearn.metrics import average_precision_score
-from slowfast.utils.ava_eval_helper import (
-    evaluate_ava,
-    read_csv,
-    read_exclusions,
-    read_labelmap,
-)
+
+import slowfast.utils.logging as logging
+import slowfast.utils.metrics as metrics
+import slowfast.utils.misc as misc
+
 
 logger = logging.get_logger(__name__)
 
@@ -44,7 +37,7 @@ def get_ava_mini_groundtruth(full_groundtruth):
     return ret
 
 
-class AVAMeter:
+class AVAMeter(object):
     """
     Measure the AVA train, val, and test stats.
     """
@@ -73,11 +66,15 @@ class AVAMeter:
         self.categories, self.class_whitelist = read_labelmap(
             os.path.join(cfg.AVA.ANNOTATION_DIR, cfg.AVA.LABEL_MAP_FILE)
         )
-        gt_filename = os.path.join(cfg.AVA.ANNOTATION_DIR, cfg.AVA.GROUNDTRUTH_FILE)
+        gt_filename = os.path.join(
+            cfg.AVA.ANNOTATION_DIR, cfg.AVA.GROUNDTRUTH_FILE
+        )
         self.full_groundtruth = read_csv(gt_filename, self.class_whitelist)
         self.mini_groundtruth = get_ava_mini_groundtruth(self.full_groundtruth)
 
-        _, self.video_idx_to_name = ava_helper.load_image_lists(cfg, mode == "train")
+        _, self.video_idx_to_name = ava_helper.load_image_lists(
+            cfg, mode == "train"
+        )
         self.output_dir = cfg.OUTPUT_DIR
 
         self.min_top1_err = 100.0
@@ -102,7 +99,9 @@ class AVAMeter:
         if self.mode == "train":
             stats = {
                 "_type": "{}_iter".format(self.mode),
-                "cur_epoch": "{}/{}".format(cur_epoch + 1, self.cfg.SOLVER.MAX_EPOCH),
+                "cur_epoch": "{}/{}".format(
+                    cur_epoch + 1, self.cfg.SOLVER.MAX_EPOCH
+                ),
                 "cur_iter": "{}".format(cur_iter + 1),
                 "eta": eta,
                 "dt": self.iter_timer.seconds(),
@@ -115,7 +114,9 @@ class AVAMeter:
         elif self.mode == "val":
             stats = {
                 "_type": "{}_iter".format(self.mode),
-                "cur_epoch": "{}/{}".format(cur_epoch + 1, self.cfg.SOLVER.MAX_EPOCH),
+                "cur_epoch": "{}/{}".format(
+                    cur_epoch + 1, self.cfg.SOLVER.MAX_EPOCH
+                ),
                 "cur_iter": "{}".format(cur_iter + 1),
                 "eta": eta,
                 "dt": self.iter_timer.seconds(),
@@ -237,7 +238,7 @@ class AVAMeter:
             logging.log_json_stats(stats, self.output_dir)
 
 
-class TestMeter:
+class TestMeter(object):
     """
     Perform the multi-view ensemble for testing: each video with an unique index
     will be sampled with multiple clips, and the predictions of the clips will
@@ -303,7 +304,7 @@ class TestMeter:
             self.video_preds -= 1e10
         self.video_labels.zero_()
 
-    def update_stats(self, preds, labels, clip_ids):
+    def update_stats(self, preds, clip_ids,labels=None):
         """
         Collect the predictions from the current batch and perform on-the-flight
         summation as ensemble.
@@ -316,23 +317,42 @@ class TestMeter:
             clip_ids (tensor): clip indexes of the current batch, dimension is
                 N.
         """
-        for ind in range(preds.shape[0]):
-            vid_id = int(clip_ids[ind]) // self.num_clips
-            if self.video_labels[vid_id].sum() > 0:
-                assert torch.equal(
-                    self.video_labels[vid_id].type(torch.FloatTensor),
-                    labels[ind].type(torch.FloatTensor),
-                )
-            self.video_labels[vid_id] = labels[ind]
+        if labels!= None:
+            for ind in range(preds.shape[0]):
+                vid_id = int(clip_ids[ind]) // self.num_clips # num_clips =3
+                if self.video_labels[vid_id].sum() > 0:
+                    assert torch.equal(
+                        self.video_labels[vid_id].type(torch.FloatTensor),
+                        labels[ind].type(torch.FloatTensor),
+                    )
+                self.video_labels[vid_id] = labels[ind]
+                if self.ensemble_method == "sum":
+                    self.video_preds[vid_id] += preds[ind]
+                elif self.ensemble_method == "max":
+                    self.video_preds[vid_id] = torch.max(
+                        self.video_preds[vid_id], preds[ind]
+                    )
+                else:
+                    raise NotImplementedError(
+                        "Ensemble Method {} is not supported".format(
+                            self.ensemble_method
+                        )
+                    )
+                self.clip_count[vid_id] += 1
+        else:
+            vid_id = int(clip_ids) // self.num_clips # num_clips =3
+            
             if self.ensemble_method == "sum":
-                self.video_preds[vid_id] += preds[ind]
+                self.video_preds[vid_id] += preds[0]
             elif self.ensemble_method == "max":
                 self.video_preds[vid_id] = torch.max(
-                    self.video_preds[vid_id], preds[ind]
+                    self.video_preds[vid_id], preds[0]
                 )
             else:
                 raise NotImplementedError(
-                    "Ensemble Method {} is not supported".format(self.ensemble_method)
+                    "Ensemble Method {} is not supported".format(
+                        self.ensemble_method
+                    )
                 )
             self.clip_count[vid_id] += 1
 
@@ -399,15 +419,20 @@ class TestMeter:
             num_topks_correct = metrics.topks_correct(
                 self.video_preds, self.video_labels, ks
             )
-            topks = [(x / self.video_preds.size(0)) * 100.0 for x in num_topks_correct]
+            topks = [
+                (x / self.video_preds.size(0)) * 100.0
+                for x in num_topks_correct
+            ]
             assert len({len(ks), len(topks)}) == 1
             for k, topk in zip(ks, topks):
                 # self.stats["top{}_acc".format(k)] = topk.cpu().numpy()
-                self.stats["top{}_acc".format(k)] = "{:.{prec}f}".format(topk, prec=2)
+                self.stats["top{}_acc".format(k)] = "{:.{prec}f}".format(
+                    topk, prec=2
+                )
         logging.log_json_stats(self.stats)
 
 
-class ScalarMeter:
+class ScalarMeter(object):
     """
     A scalar meter uses a deque to track a series of scaler values with a given
     window size. It supports calculating the median and average values of the
@@ -461,7 +486,7 @@ class ScalarMeter:
         return self.total / self.count
 
 
-class ListMeter:
+class ListMeter(object):
     def __init__(self, list_size):
         """
         Args:
@@ -497,7 +522,7 @@ class ListMeter:
         return self.total / self.count
 
 
-class TrainMeter:
+class TrainMeter(object):
     """
     Measure training stats.
     """
@@ -508,6 +533,9 @@ class TrainMeter:
             epoch_iters (int): the overall number of iterations of one epoch.
             cfg (CfgNode): configs.
         """
+        # added by parisa
+        self.train_top1_err_per_epoch = []
+        # added by parisa
         self._cfg = cfg
         self.epoch_iters = epoch_iters
         self.MAX_EPOCH = cfg.SOLVER.MAX_EPOCH * epoch_iters
@@ -599,7 +627,10 @@ class TrainMeter:
             prev_loss = 0.0
             for i in range(2, 7):
                 prev_loss += self.loss.deque[len(self.loss.deque) - i]
-            if loss > self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR * prev_loss / 5.0:
+            if (
+                loss
+                > self._cfg.TRAIN.KILL_LOSS_EXPLOSION_FACTOR * prev_loss / 5.0
+            ):
                 raise RuntimeError(
                     "ERROR: Got Loss explosion of {} {}".format(
                         loss, datetime.datetime.now()
@@ -620,7 +651,9 @@ class TrainMeter:
         )
         eta = str(datetime.timedelta(seconds=int(eta_sec)))
         stats = {
-            "_type": "train_iter_{}".format("ssl" if self._cfg.TASK == "ssl" else ""),
+            "_type": "train_iter_{}".format(
+                "ssl" if self._cfg.TASK == "ssl" else ""
+            ),
             "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
             "iter": "{}/{}".format(cur_iter + 1, self.epoch_iters),
             "dt": self.iter_timer.seconds(),
@@ -652,7 +685,9 @@ class TrainMeter:
         )
         eta = str(datetime.timedelta(seconds=int(eta_sec)))
         stats = {
-            "_type": "train_epoch{}".format("_ssl" if self._cfg.TASK == "ssl" else ""),
+            "_type": "train_epoch{}".format(
+                "_ssl" if self._cfg.TASK == "ssl" else ""
+            ),
             "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
             "dt": self.iter_timer.seconds(),
             "dt_data": self.data_timer.seconds(),
@@ -670,6 +705,8 @@ class TrainMeter:
             stats["top1_err"] = top1_err
             stats["top5_err"] = top5_err
             stats["loss"] = avg_loss
+
+            self.train_top1_err_per_epoch.append(top1_err)
         if self.multi_loss is not None:
             avg_loss_list = self.multi_loss.get_global_avg()
             for idx, loss in enumerate(avg_loss_list):
@@ -677,7 +714,7 @@ class TrainMeter:
         logging.log_json_stats(stats, self.output_dir)
 
 
-class ValMeter:
+class ValMeter(object):
     """
     Measures validation stats.
     """
@@ -688,6 +725,9 @@ class ValMeter:
             max_iter (int): the max number of iteration of the current epoch.
             cfg (CfgNode): configs.
         """
+        # added by parisa
+        self.val_top1_err_per_epoch = []
+        # added by parisa
         self._cfg = cfg
         self.max_iter = max_iter
         self.iter_timer = Timer()
@@ -777,7 +817,9 @@ class ValMeter:
         eta_sec = self.iter_timer.seconds() * (self.max_iter - cur_iter - 1)
         eta = str(datetime.timedelta(seconds=int(eta_sec)))
         stats = {
-            "_type": "val_iter{}".format("_ssl" if self._cfg.TASK == "ssl" else ""),
+            "_type": "val_iter{}".format(
+                "_ssl" if self._cfg.TASK == "ssl" else ""
+            ),
             "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
             "iter": "{}/{}".format(cur_iter + 1, self.max_iter),
             "time_diff": self.iter_timer.seconds(),
@@ -795,8 +837,11 @@ class ValMeter:
         Args:
             cur_epoch (int): the number of current epoch.
         """
+
         stats = {
-            "_type": "val_epoch{}".format("_ssl" if self._cfg.TASK == "ssl" else ""),
+            "_type": "val_epoch{}".format(
+                "_ssl" if self._cfg.TASK == "ssl" else ""
+            ),
             "epoch": "{}/{}".format(cur_epoch + 1, self._cfg.SOLVER.MAX_EPOCH),
             "time_diff": self.iter_timer.seconds(),
             "gpu_mem": "{:.2f}G".format(misc.gpu_mem_usage()),
@@ -807,6 +852,7 @@ class ValMeter:
                 torch.cat(self.all_preds).cpu().numpy(),
                 torch.cat(self.all_labels).cpu().numpy(),
             )
+            logging.log_json_stats(stats, self.output_dir)
         else:
             top1_err = self.num_top1_mis / self.num_samples
             top5_err = self.num_top5_mis / self.num_samples
@@ -818,7 +864,9 @@ class ValMeter:
             stats["min_top1_err"] = self.min_top1_err
             stats["min_top5_err"] = self.min_top5_err
 
-        logging.log_json_stats(stats, self.output_dir)
+            self.val_top1_err_per_epoch.append(top1_err)
+
+            logging.log_json_stats(stats, self.output_dir)
 
 
 def get_map(preds, labels):

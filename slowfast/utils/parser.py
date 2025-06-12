@@ -25,6 +25,7 @@ def parse_args():
         opts (argument): provide addtional options from the command line, it
             overwrites the config loaded from file.
     """
+    
     parser = argparse.ArgumentParser(
         description="Provide SlowFast video training and testing pipeline."
     )
@@ -79,7 +80,7 @@ def load_config(args, path_to_config=None):
     # Load config from command line, overwrite config from opts.
     if args.opts is not None:
         cfg.merge_from_list(args.opts)
-
+    
     # Inherit parameters from args.
     if hasattr(args, "num_shards") and hasattr(args, "shard_id"):
         cfg.NUM_SHARDS = args.num_shards
